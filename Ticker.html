@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>Ticker</title>
+<style>
+  :root { color-scheme: dark; box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html, body { height: 100%; margin: 0; background: #000; }
+  body { display: flex; align-items: center; justify-content: center; gap: 8vmin; flex-wrap: wrap; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; font-family: -apple-system, system-ui, sans-serif; }
+  button { width: min(38vmin, 220px); height: min(38vmin, 220px); border-radius: 50%; border: 2px solid #fff; background: #000; color: #fff; font-size: 20px; letter-spacing: .08em; cursor: pointer; transition: background .15s, color .15s, transform .08s; touch-action: manipulation; }
+  button.on { background: #fff; color: #000; }
+  button.beat { transform: scale(.96); }
+  @media (max-width: 600px) and (orientation: portrait) { body { flex-direction: column; flex-wrap: nowrap; } }
+</style>
+</head>
+<body>
+<button id="a" aria-label="Steady 60 BPM">60</button>
+<button id="b" aria-label="Slowing 60 to 45 BPM over 10 minutes">60→45</button>
+<audio id="au" playsinline preload="auto"></audio>
+<script>
+const SR = 11025, DUR2 = 600;
+const au = document.getElementById('au');
+const btns = { a: document.getElementById('a'), b: document.getElementById('b') };
+const cache = {};
+let mode = null, wake = null;
+
+function tick(buf, at) {
+  const start = Math.round(at * SR), len = Math.round(0.05 * SR);
+  for (let i = 0; i < len && start + i < buf.length; i++) {
+    const t = i / SR;
+    buf[start + i] += Math.sin(2 * Math.PI * 1300 * t) * Math.exp(-t * 90) * 0.9;
+  }
+}
+function wav(times, seconds) {
+  const n = seconds * SR, f = new Float32Array(n);
+  times.forEach(t => tick(f, t));
+  const out = new DataView(new ArrayBuffer(44 + n * 2));
+  const w = (o, s) => [...s].forEach((c, i) => out.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); out.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt ');
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+  out.setUint32(24, SR, true); out.setUint32(28, SR * 2, true);
+  out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, 'data'); out.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, f[i])) * 32767, true);
+  return URL.createObjectURL(new Blob([out], { type: 'audio/wav' }));
+}
+function source(m) {
+  if (cache[m]) return cache[m];
+  if (m === 'a') {
+    cache.a = wav(Array.from({ length: 120 }, (_, i) => i), 120);
+  } else {
+    // bpm falls linearly 60 -> 45 over 600s: beat n lands at t = 2400(1 - sqrt(1 - n/1200))
+    const times = [];
+    for (let n = 0; n < 525; n++) times.push(2400 * (1 - Math.sqrt(1 - n / 1200)));
+    cache.b = wav(times, DUR2);
+  }
+  return cache[m];
+}
+async function lock() {
+  try { if ('wakeLock' in navigator && !wake) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => wake = null); } } catch (e) {}
+}
+function unlock() { try { wake && wake.release(); } catch (e) {} wake = null; }
+
+function stop() {
+  au.pause(); au.removeAttribute('src'); au.load();
+  mode = null; unlock();
+  Object.values(btns).forEach(b => b.classList.remove('on'));
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
+}
+function start(m) {
+  stop();
+  mode = m;
+  au.loop = (m === 'a');
+  au.src = source(m);
+  au.play().catch(() => stop());
+  btns[m].classList.add('on');
+  lock();
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: m === 'a' ? '60 BPM' : '60 → 45 BPM' });
+    navigator.mediaSession.setActionHandler('pause', stop);
+    navigator.mediaSession.setActionHandler('stop', stop);
+  }
+}
+['a', 'b'].forEach(m => btns[m].addEventListener('click', () => mode === m ? stop() : start(m)));
+au.addEventListener('ended', stop);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && mode) lock(); });
+
+let last = -1;
+function frame() {
+  if (mode && !au.paused) {
+    const t = au.currentTime;
+    const n = Math.floor(mode === 'a' ? t : t - t * t / 4800 + 0.0001);
+    if (n !== last) { last = n; btns[mode].classList.add('beat'); setTimeout(() => btns[mode] && btns[mode].classList.remove('beat'), 80); }
+  } else last = -1;
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
